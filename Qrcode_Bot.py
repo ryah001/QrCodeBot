@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 QRcodeBot - Bot Telegram pour générer et décoder des QR codes.
-Version sécurisée avec lecture du token depuis .env
+Version sécurisée avec lecture du token depuis .env et ping Flask pour rester actif sur Render.
 """
 
 import logging
 import os
 from io import BytesIO
+import threading
 
 from dotenv import load_dotenv
 from telegram import (
@@ -27,63 +28,66 @@ import qrcode
 from PIL import Image
 import numpy as np
 import cv2
+from flask import Flask
 
 # --- Chargement du token depuis .env ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# --- Vérification ---
 if not BOT_TOKEN:
     raise ValueError("❌ Erreur : Le token du bot est introuvable. "
                      "Assure-toi d'avoir créé un fichier .env avec la ligne :\nBOT_TOKEN=ton_token_ici")
 
-# --- Configuration du logging ---
+# --- Logging ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# --- Flask ping server ---
+app_flask = Flask("ping")
+
+@app_flask.route("/")
+def home():
+    return "QRcodeBot actif ! ✅"
+
+def run_flask():
+    app_flask.run(host="0.0.0.0", port=10000)
+
+threading.Thread(target=run_flask).start()
 
 # --- UI Helpers ---
 def main_menu_keyboard():
-    """Menu principal"""
     keyboard = [
         [InlineKeyboardButton("🌀 Générer un QR code", callback_data="mode_generate")],
         [InlineKeyboardButton("🔍 Décoder un QR code", callback_data="mode_decode")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
 def in_mode_keyboard():
-    """Menu secondaire (pendant génération ou décodage)"""
     keyboard = [
         [InlineKeyboardButton("⬅️ Retour au menu", callback_data="back_to_menu")],
         [InlineKeyboardButton("🛑 Arrêter (/stop)", callback_data="stop")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-
-# --- Commandes principales ---
+# --- Commandes ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /start"""
     user = update.effective_user
     text = (
         f"👋 Bonjour {user.first_name or 'utilisateur'} !\n\n"
-        "Je suis *QRcodeBot*, ton assistant pour créer et lire des QR codes.\n\n"
+        "Je suis *QR code*, ton assistant pour créer et lire des QR codes.\n\n"
         "Que veux-tu faire ?"
     )
     context.user_data['mode'] = None
     await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
-
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande /stop"""
     context.user_data['mode'] = None
     await update.message.reply_text("🛑 Mode arrêté. Retour au menu principal.", reply_markup=main_menu_keyboard())
 
-
-# --- Gestion des boutons du menu ---
+# --- Boutons ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -98,29 +102,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=in_mode_keyboard()
         )
-
     elif data == "mode_decode":
         context.user_data['mode'] = 'decode'
         await query.message.reply_text(
             "🔍 Mode *Décodage* activé.\n"
-            "Envoie-moi une image (photo ou fichier) contenant un QR code à lire.\n\n"
+            "Envoie-moi une image contenant un QR code à lire.\n\n"
             "Tu peux en envoyer plusieurs successivement.",
             parse_mode="Markdown",
             reply_markup=in_mode_keyboard()
         )
-
     elif data == "back_to_menu":
         context.user_data['mode'] = None
         await query.message.reply_text("⬅️ Retour au menu principal.", reply_markup=main_menu_keyboard())
-
     elif data == "stop":
         context.user_data['mode'] = None
         await query.message.reply_text("🛑 Mode arrêté. Tape /start pour recommencer.", reply_markup=main_menu_keyboard())
 
-
-# --- Génération de QR ---
+# --- QR Generation ---
 def generate_qr_image_bytes(text: str) -> BytesIO:
-    """Crée un QR code PNG en mémoire"""
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_Q,
@@ -135,10 +134,8 @@ def generate_qr_image_bytes(text: str) -> BytesIO:
     bio.seek(0)
     return bio
 
-
-# --- Décodage de QR ---
+# --- QR Decoding ---
 def decode_qr_from_image_bytes(image_bytes: bytes):
-    """Tente de décoder un QR code depuis une image (OpenCV)"""
     arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -158,8 +155,7 @@ def decode_qr_from_image_bytes(image_bytes: bytes):
 
     return []
 
-
-# --- Messages texte ---
+# --- Text Handler ---
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get('mode')
     text = update.message.text.strip() if update.message.text else ""
@@ -175,12 +171,10 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             photo=bio,
             caption="✅ Voici ton QR code.\nEnvoie un autre texte pour en générer un autre, ou /stop pour quitter."
         )
-
     else:
         await update.message.reply_text("❔ Choisis une action dans le menu :", reply_markup=main_menu_keyboard())
 
-
-# --- Messages avec images ---
+# --- Photo / Document Handler ---
 async def photo_or_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get('mode')
     file_id = None
@@ -210,11 +204,9 @@ async def photo_or_document_handler(update: Update, context: ContextTypes.DEFAUL
     else:
         await update.message.reply_text("💡 Tu dois d'abord choisir *Décoder un QR code* dans le menu.", reply_markup=main_menu_keyboard())
 
-
-# --- Messages inconnus ---
+# --- Unknown Handler ---
 async def unknown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Je n'ai pas compris. Utilise /start pour revenir au menu.")
-
 
 # --- Main ---
 def main():
@@ -237,7 +229,6 @@ def main():
 
     logger.info("✅ QRcodeBot démarré (mode polling)...")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
