@@ -3,3 +3,5 @@ qrcode
 Pillow
 python-dotenv
 pyzbar
+numpy
+opencv-python
