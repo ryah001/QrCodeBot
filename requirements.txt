@@ -1,0 +1,8 @@
+python-telegram-bot==20.8
+qrcode
+pillow
+opencv-python
+numpy
+python-dotenv
+httpx
+pytz
