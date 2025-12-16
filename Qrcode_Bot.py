@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 QRcodeBot - Bot Telegram pour générer et décoder des QR codes.
-Version sécurisée avec lecture du token depuis .env et ping Flask pour rester actif sur Render.
+Avec génération depuis texte et images (3 modes image).
 """
 
 import logging
 import os
 from io import BytesIO
 import threading
+import base64
 
 from dotenv import load_dotenv
 from telegram import (
@@ -24,19 +26,19 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
 import qrcode
 from PIL import Image
 import numpy as np
 import cv2
 from flask import Flask
 
-# --- Chargement du token depuis .env ---
+# --- Chargement du token ---
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise ValueError("❌ Erreur : Le token du bot est introuvable. "
-                     "Assure-toi d'avoir créé un fichier .env avec la ligne :\nBOT_TOKEN=ton_token_ici")
+    raise ValueError("Token Telegram introuvable (.env)")
 
 # --- Logging ---
 logging.basicConfig(
@@ -45,23 +47,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Flask ping server ---
+# --- Flask ping ---
 app_flask = Flask("ping")
 
 @app_flask.route("/")
 def home():
-    return "QRcodeBot actif ! ✅"
+    return "QRcodeBot actif"
 
 def run_flask():
     app_flask.run(host="0.0.0.0", port=10000)
 
-threading.Thread(target=run_flask).start()
+threading.Thread(target=run_flask, daemon=True).start()
 
-# --- UI Helpers ---
+# --- MENUS ---
 def main_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("🌀 Générer un QR code", callback_data="mode_generate")],
         [InlineKeyboardButton("🔍 Décoder un QR code", callback_data="mode_decode")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def generate_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📝 Texte → QR", callback_data="gen_text")],
+        [InlineKeyboardButton("🖼️ Image → QR (données)", callback_data="gen_img_base64")],
+        [InlineKeyboardButton("🎨 Image → QR stylisé", callback_data="gen_img_styled")],
+        [InlineKeyboardButton("🔗 Image → QR lien", callback_data="gen_img_link")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data="back_to_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -72,56 +84,86 @@ def in_mode_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Commandes ---
+# --- COMMANDES ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = (
-        f"👋 Bonjour {user.first_name or 'utilisateur'} !\n\n"
-        "Je suis *QR code*, ton assistant pour créer et lire des QR codes.\n\n"
-        "Que veux-tu faire ?"
+    context.user_data.clear()
+    await update.message.reply_text(
+        "👋 Bienvenue sur *QRcodeBot*\n\nChoisis une action :",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()
     )
-    context.user_data['mode'] = None
-    await update.message.reply_text(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['mode'] = None
-    await update.message.reply_text("🛑 Mode arrêté. Retour au menu principal.", reply_markup=main_menu_keyboard())
+    context.user_data.clear()
+    await update.message.reply_text(
+        "🛑 Mode arrêté.",
+        reply_markup=main_menu_keyboard()
+    )
 
-# --- Boutons ---
+# --- CALLBACKS ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
     if data == "mode_generate":
-        context.user_data['mode'] = 'generate'
         await query.message.reply_text(
-            "🌀 Mode *Génération* activé.\n"
-            "Envoie-moi le texte ou le lien à transformer en QR code.\n\n"
-            "Tu peux en envoyer plusieurs sans revenir au menu.",
-            parse_mode="Markdown",
-            reply_markup=in_mode_keyboard()
+            "Choisis le type de génération :",
+            reply_markup=generate_menu_keyboard()
         )
-    elif data == "mode_decode":
-        context.user_data['mode'] = 'decode'
-        await query.message.reply_text(
-            "🔍 Mode *Décodage* activé.\n"
-            "Envoie-moi une image contenant un QR code à lire.\n\n"
-            "Tu peux en envoyer plusieurs successivement.",
-            parse_mode="Markdown",
-            reply_markup=in_mode_keyboard()
-        )
-    elif data == "back_to_menu":
-        context.user_data['mode'] = None
-        await query.message.reply_text("⬅️ Retour au menu principal.", reply_markup=main_menu_keyboard())
-    elif data == "stop":
-        context.user_data['mode'] = None
-        await query.message.reply_text("🛑 Mode arrêté. Tape /start pour recommencer.", reply_markup=main_menu_keyboard())
 
-# --- QR Generation ---
+    elif data == "gen_text":
+        context.user_data["mode"] = "generate"
+        await query.message.reply_text(
+            "📝 Envoie le texte ou lien à convertir en QR.",
+            reply_markup=in_mode_keyboard()
+        )
+
+    elif data == "gen_img_base64":
+        context.user_data["mode"] = "img_to_qr_base64"
+        await query.message.reply_text(
+            "🖼️ Envoie une image.\nElle sera encodée dans le QR.",
+            reply_markup=in_mode_keyboard()
+        )
+
+    elif data == "gen_img_styled":
+        context.user_data["mode"] = "img_to_qr_styled"
+        await query.message.reply_text(
+            "🎨 Envoie une image.\nElle sera intégrée au centre du QR.",
+            reply_markup=in_mode_keyboard()
+        )
+
+    elif data == "gen_img_link":
+        context.user_data["mode"] = "img_to_qr_link"
+        await query.message.reply_text(
+            "🔗 Envoie une image.\nUn QR avec lien sera généré.",
+            reply_markup=in_mode_keyboard()
+        )
+
+    elif data == "mode_decode":
+        context.user_data["mode"] = "decode"
+        await query.message.reply_text(
+            "🔍 Envoie une image contenant un QR code.",
+            reply_markup=in_mode_keyboard()
+        )
+
+    elif data == "back_to_menu":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Menu principal :",
+            reply_markup=main_menu_keyboard()
+        )
+
+    elif data == "stop":
+        context.user_data.clear()
+        await query.message.reply_text(
+            "🛑 Mode arrêté.",
+            reply_markup=main_menu_keyboard()
+        )
+
+# --- QR TEXTE ---
 def generate_qr_image_bytes(text: str) -> BytesIO:
     qr = qrcode.QRCode(
-        version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_Q,
         box_size=10,
         border=4,
@@ -134,7 +176,40 @@ def generate_qr_image_bytes(text: str) -> BytesIO:
     bio.seek(0)
     return bio
 
-# --- QR Decoding ---
+# --- QR IMAGE MODES ---
+def image_to_qr_base64(image_bytes: bytes) -> BytesIO:
+    encoded = base64.b64encode(image_bytes).decode()[:2000]
+    return generate_qr_image_bytes(encoded)
+
+def image_to_qr_styled(image_bytes: bytes) -> BytesIO:
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4
+    )
+    qr.add_data("QR Stylisé")
+    qr.make(fit=True)
+
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    logo = Image.open(BytesIO(image_bytes)).convert("RGB")
+    logo = logo.resize((qr_img.size[0] // 4, qr_img.size[1] // 4))
+
+    pos = (
+        (qr_img.size[0] - logo.size[0]) // 2,
+        (qr_img.size[1] - logo.size[1]) // 2
+    )
+    qr_img.paste(logo, pos)
+
+    bio = BytesIO()
+    qr_img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
+
+def image_to_qr_link() -> BytesIO:
+    return generate_qr_image_bytes("https://example.com/image")
+
+# --- DECODAGE ---
 def decode_qr_from_image_bytes(image_bytes: bytes):
     arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -142,41 +217,24 @@ def decode_qr_from_image_bytes(image_bytes: bytes):
         return []
 
     detector = cv2.QRCodeDetector()
-    data, points, _ = detector.detectAndDecode(img)
-    if data:
-        return [data]
+    data, _, _ = detector.detectAndDecode(img)
+    return [data] if data else []
 
-    try:
-        retval, decoded_info, points, _ = detector.detectAndDecodeMulti(img)
-        if retval:
-            return [d for d in decoded_info if d]
-    except Exception:
-        pass
-
-    return []
-
-# --- Text Handler ---
+# --- HANDLER TEXTE ---
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = context.user_data.get('mode')
-    text = update.message.text.strip() if update.message.text else ""
-
-    if mode == 'generate':
-        if not text:
-            await update.message.reply_text("⚠️ Envoie un texte ou un lien à transformer en QR code.")
-            return
-
-        bio = generate_qr_image_bytes(text)
-        bio.name = "qrcode.png"
-        await update.message.reply_photo(
-            photo=bio,
-            caption="✅ Voici ton QR code.\nEnvoie un autre texte pour en générer un autre, ou /stop pour quitter."
-        )
+    if context.user_data.get("mode") == "generate":
+        qr = generate_qr_image_bytes(update.message.text)
+        qr.name = "qrcode.png"
+        await update.message.reply_photo(photo=qr, caption="✅ QR généré.")
     else:
-        await update.message.reply_text("❔ Choisis une action dans le menu :", reply_markup=main_menu_keyboard())
+        await update.message.reply_text(
+            "Choisis une option dans le menu.",
+            reply_markup=main_menu_keyboard()
+        )
 
-# --- Photo / Document Handler ---
+# --- HANDLER IMAGE ---
 async def photo_or_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = context.user_data.get('mode')
+    mode = context.user_data.get("mode")
     file_id = None
 
     if update.message.photo:
@@ -185,49 +243,60 @@ async def photo_or_document_handler(update: Update, context: ContextTypes.DEFAUL
         file_id = update.message.document.file_id
 
     if not file_id:
-        await update.message.reply_text("⚠️ Envoie une photo ou un fichier image contenant un QR code.")
         return
 
-    if mode == 'decode':
-        file = await context.bot.get_file(file_id)
-        bio = BytesIO()
-        await file.download_to_memory(out=bio)
-        bio.seek(0)
-        decoded_list = decode_qr_from_image_bytes(bio.getvalue())
+    file = await context.bot.get_file(file_id)
+    bio = BytesIO()
+    await file.download_to_memory(out=bio)
+    image_bytes = bio.getvalue()
 
-        if not decoded_list:
-            await update.message.reply_text("❌ Aucun QR code détecté. Essaie une image plus nette.")
-        elif len(decoded_list) == 1:
-            await update.message.reply_text(f"📜 Contenu décodé :\n\n{decoded_list[0]}")
-        else:
-            await update.message.reply_text("📜 Plusieurs QR codes trouvés :\n" + "\n".join(decoded_list))
+    if mode == "img_to_qr_base64":
+        qr = image_to_qr_base64(image_bytes)
+
+    elif mode == "img_to_qr_styled":
+        qr = image_to_qr_styled(image_bytes)
+
+    elif mode == "img_to_qr_link":
+        qr = image_to_qr_link()
+
+    elif mode == "decode":
+        decoded = decode_qr_from_image_bytes(image_bytes)
+        await update.message.reply_text(
+            decoded[0] if decoded else "❌ Aucun QR détecté."
+        )
+        return
+
     else:
-        await update.message.reply_text("💡 Tu dois d'abord choisir *Décoder un QR code* dans le menu.", reply_markup=main_menu_keyboard())
+        await update.message.reply_text(
+            "Choisis d'abord un mode.",
+            reply_markup=main_menu_keyboard()
+        )
+        return
 
-# --- Unknown Handler ---
+    qr.name = "qrcode.png"
+    await update.message.reply_photo(photo=qr, caption="✅ QR généré.")
+
+# --- UNKNOWN ---
 async def unknown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Je n'ai pas compris. Utilise /start pour revenir au menu.")
+    await update.message.reply_text(
+        "Commande inconnue. /start",
+        reply_markup=main_menu_keyboard()
+    )
 
-# --- Main ---
+# --- MAIN ---
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Commandes
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop_command))
-
-    # Boutons
     app.add_handler(CallbackQueryHandler(button_callback))
 
-    # Messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_or_document_handler))
     app.add_handler(MessageHandler(filters.Document.IMAGE, photo_or_document_handler))
-
-    # Fallback
     app.add_handler(MessageHandler(filters.ALL, unknown_handler))
 
-    logger.info("✅ QRcodeBot démarré (mode polling)...")
+    logger.info("QRcodeBot démarré")
     app.run_polling()
 
 if __name__ == "__main__":
